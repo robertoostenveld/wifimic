@@ -1,12 +1,8 @@
 #!/usr/bin/env python
 
 import pyaudio
-import wave
-import time
-import sys
 import socket
 import struct
-import math
 import numpy as np
 import threading
 
