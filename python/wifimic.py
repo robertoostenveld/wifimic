@@ -113,14 +113,14 @@ if __name__ == '__main__':
     while True:
       conn, addr = sock.accept()
       if not addr in clients:
-         print 'Got connection from', addr
+         print('Got connection from', addr)
          thread = threading.Thread(target=clientHandler,args=(conn,addr))
          clients.append(addr)
          threads.append(thread)
          thread.start()
 
   except (SystemExit, KeyboardInterrupt, RuntimeError):
-    print 'Stopping'
+    print('Stopping')
 
     for thread in threads:
       running = False
