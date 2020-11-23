@@ -13,6 +13,7 @@ import threading
 # this is to prevent concurrency problems
 lock = threading.Lock()
 
+total = 0
 recvPort = 4000
 sendPort = 4001
 fifo = {}
@@ -24,17 +25,26 @@ threads = []
 def audioHandler(input, frame_count, time_info, status):
 
   output = np.zeros(frame_count).astype(np.int16)
-  for key, value in fifo.items():
-    if len(value)>=(frame_count*2):
-      output += np.frombuffer(bytes(value[0:(frame_count*2)]), dtype=np.int16)
-      fifo[key] = value[(frame_count*2):]
-    else:
-      print('underrun', key)
+  
+  with lock:
+    l = []
+    for key, value in fifo.items():
+      l.append(len(value)/2)
+    print(l)
 
+    for key, value in fifo.items():
+      if len(value)>=(frame_count*2):
+        output += np.frombuffer(bytes(value[0:(frame_count*2)]), dtype=np.int16)
+        fifo[key] = value[(frame_count*2):]
+      else:
+        print('underrun', key)
+ 
   return (output.tobytes(), pyaudio.paContinue)
 
 
 def clientHandler(conn, addr):
+
+  frame_count = 1024
 
   while running:
 
@@ -49,16 +59,16 @@ def clientHandler(conn, addr):
     data = bytearray(buf)
 
     with lock:
-      print(version, id, counter, samples, len(buf))
+      # print(version, id, counter, samples, len(buf))
    
       if not id in fifo:
         fifo[id] = bytearray(0)
    
       if len(fifo[id])==0:
         fifo[id] = data
-      elif len(fifo[id])>(5000*2):
-        print('overrun')
-        fifo[id] = fifo[id][-(2500*2):] + data
+      elif len(fifo[id])>2*(frame_count*2):
+        print('overrun', id)
+        fifo[id] = fifo[id][(frame_count*2):]
       else:
         fifo[id] = fifo[id] + data
    
