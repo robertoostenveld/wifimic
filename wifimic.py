@@ -11,13 +11,11 @@ import struct
 import math
 import numpy as np
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-sock.bind(('', 4000))
+recvPort = 4000
+sendPort = 4001
 
-volume = 0.1     # range [0.0, 1.0]
-fs = 22050       # sampling rate, Hz, must be integer
-duration = 1.0   # in seconds, may be float
-f = 440.0        # sine frequency, Hz, may be float
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+sock.bind(('', recvPort))
 
 p = pyaudio.PyAudio()
 
@@ -32,38 +30,58 @@ for i in range(info.get('deviceCount')):
         print("Output Device id " + str(i) + " - " + p.get_device_info_by_host_api_device_index(0, i).get('name'))
 print('------------------------------------------------------------------')
 
-def bytes_to_int(bytes):
-    result = 0
-    for b in bytes:
-        result = result * 256 + int(b)
-    return result
+fifo = {}
+previous = {}
 
-def int_to_bytes(value, length):
-    result = []
-    for i in range(0, length):
-        result.append(value >> (i * 8) & 0xff)
-    result.reverse()
-    return result
+def callback(in_data, frame_count, time_info, status):
+  global fifo
+
+  out_data = np.zeros(frame_count).astype(np.int16)
+  for key, value in fifo.items():
+    if len(value)>=(frame_count*2):
+      out_data += np.frombuffer(bytes(value[0:(frame_count*2)]), dtype=np.int16)
+      fifo[key] = value[(frame_count*2):]
+    else:
+      print('underrun', key)
+
+  return (out_data.tobytes(), pyaudio.paContinue)
 
 stream = p.open(format=pyaudio.paInt16,
                 channels=1,
                 rate=22050,
+                output=True,
                 output_device_index=0,
-                output=True)
+                stream_callback=callback)
 
-previous = 0
+stream.start_stream()
 
 while True:
-  buf = sock.recv(720*2+16)
-  (version, counter, samples, mean, rms) = struct.unpack('IIIHH', buf[0:16])
-  data = bytearray(buf[16:])
+  buf, addr = sock.recvfrom(16)
+  (version, id, counter, samples) = struct.unpack('IIII', buf[0:16])
+  data = bytearray(sock.recv(samples*2))
 
-  print(version, counter, samples, mean, rms, bytes_to_int(data[0:2]))
-  if counter != previous+1:
-    print('missed packet')
-  previous = counter
+  print(version, id, counter, samples, int(np.frombuffer(data[0:2], dtype=np.int16)))
 
-  stream.write(bytes(data))
+  response = struct.pack('III', 1, 21, counter)
+  sock.sendto(response, (addr[0], sendPort))
+
+  if not id in fifo:
+    fifo[id] = bytearray(0)
+
+  if len(fifo[id])==0:
+    fifo[id] = data
+  elif len(fifo[id])>(5000*2):
+    print('overrun')
+    fifo[id] = fifo[id][-(2500*2):] + data
+  else:
+    fifo[id] = fifo[id] + data
+
+  if not id in previous:
+    previous[id] = 0
+
+  if counter != previous[id]+1:
+    print('missed packet', id)
+  previous[id] = counter
 
 stream.stop_stream()
 stream.close()
