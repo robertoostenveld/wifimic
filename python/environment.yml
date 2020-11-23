@@ -1,0 +1,32 @@
+name: wifimic
+channels:
+  - defaults
+dependencies:
+  - blas=1.0=mkl
+  - ca-certificates=2020.10.14=0
+  - certifi=2020.11.8=py38hecd8cb5_0
+  - intel-openmp=2019.4=233
+  - libcxx=10.0.0=1
+  - libedit=3.1.20191231=h1de35cc_1
+  - libffi=3.3=hb1e8313_2
+  - mkl=2019.4=233
+  - mkl-service=2.3.0=py38hfbe908c_0
+  - mkl_fft=1.2.0=py38hc64f4ea_0
+  - mkl_random=1.1.1=py38h959d312_0
+  - ncurses=6.2=h0a44026_1
+  - numpy=1.19.2=py38h456fd55_0
+  - numpy-base=1.19.2=py38hcfb5961_0
+  - openssl=1.1.1h=haf1e3a3_0
+  - pip=20.2.4=py38hecd8cb5_0
+  - portaudio=19.6.0=h647c56a_4
+  - pyaudio=0.2.11=py38h1de35cc_2
+  - python=3.8.5=h26836e1_1
+  - readline=8.0=h1de35cc_0
+  - setuptools=50.3.1=py38hecd8cb5_1
+  - six=1.15.0=py38hecd8cb5_0
+  - sqlite=3.33.0=hffcf06c_0
+  - tk=8.6.10=hb0a8c7a_0
+  - wheel=0.35.1=pyhd3eb1b0_0
+  - xz=5.2.5=h1de35cc_0
+  - zlib=1.2.11=h1de35cc_3
+prefix: /opt/anaconda3/envs/wifimic
