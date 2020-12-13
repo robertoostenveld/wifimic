@@ -14,24 +14,26 @@
 #include <math.h>
 #include <limits.h>
 
-#include "secret.h"
+#include "secret.h" // this contains the ssid and password
 #include "RunningStat.h"
 
 #define USE_DHCP
 #define CONNECT_LOLIN32
-#define PRINT_RANGE
+// #define PRINT_RANGE
+// #define PRINT_VOLUME
+#define PRINT_FREQUENCY
 #define DO_RECONNECT
+// #define DO_THRESHOLD
 
 #ifndef USE_DHCP
-IPAddress localAddress(192, 168, 1, 100);
-IPAddress gateway(192, 168, 1, 1);
+IPAddress localAddress(192, 168, 4, 2);
+IPAddress gateway(192, 168, 4, 1);
 IPAddress subnet(255, 255, 0, 0);
 IPAddress primaryDNS(8, 8, 8, 8);   //optional
 IPAddress secondaryDNS(8, 8, 4, 4); //optional
 #endif
 
-// IPAddress serverAddress(192, 168, 1, 21);
-IPAddress serverAddress(192, 168, 1, 34);
+IPAddress serverAddress(192, 168, 4, 1);
 
 const unsigned int serverPort = 4000;
 const unsigned int recvPort = 4001;
@@ -41,16 +43,19 @@ WiFiClient Tcp;
 
 unsigned long blinkTime = 250;
 unsigned long lastBlink = 0;
+unsigned long lastThreshold = 0;
+unsigned long thresholdInterval = 250;
 unsigned int reconnectInterval = 10000;
 unsigned long lastConnect = 0;
 bool connected = false;
 const unsigned int sampleRate = 22050;
-const unsigned int nMessage = 512; // it can be up to 720
+const unsigned int nMessage = 512; // this can be up to 720 and still fit within the MTU
 const unsigned int nBuffer = 64;
 bool meanInitialized = 0;
 const double alpha = 10. / sampleRate; // if the sampling time dT is much smaller than the time constant T, then alpha=1/(T*sampleRate) and T=1/(alpha*sampleRate)
 double signalMean = sqrt(-1); // initialize as not-a-number
 double signalScale = 1000;
+double volumeThreshold = 55;
 
 struct message_t {
   uint32_t version = 1;
@@ -257,7 +262,7 @@ void loop() {
 #endif
 
 #ifdef PRINT_VOLUME
-      Serial.println(10*log10(shortstat.Variance()));
+      Serial.println(10 * log10(shortstat.Variance()));
 #endif
 
 #ifdef PRINT_HEADER
@@ -290,10 +295,24 @@ void loop() {
       }
 #endif
 
+
       if (connected) {
         blinkTime = 1000;
-        int count = Tcp.write((uint8_t *)(&message), sizeof(message));
-        connected = (count == sizeof(message));
+
+#ifdef DO_THRESHOLD
+        bool aboveThreshold = (10 * log10(shortstat.Variance()) > volumeThreshold);
+        if (aboveThreshold)
+          lastThreshold = millis();
+        else if ((millis() - lastThreshold) < thresholdInterval)
+          aboveThreshold = 1;
+#else
+        bool aboveThreshold = 1;
+#endif
+
+        if (aboveThreshold) {
+          int count = Tcp.write((uint8_t *)(&message), sizeof(message));
+          connected = (count == sizeof(message));
+        }
       }
       else {
         blinkTime = 250;
