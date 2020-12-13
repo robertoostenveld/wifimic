@@ -48,7 +48,7 @@ and was able to play a stereo wav file that I downloaded from [onlinetonegenerat
 
 I followed the instructions [here](https://www.raspberrypi.org/documentation/configuration/wireless/access-point-routed.md) to set it up as a wireless access point. Since this involves downloading packages from internet, but also changing the wifi settings, I used an OTG adapter and a USB ethernet adapter to implement a wired network connection. This allows headless access via ssh to debug the wireless setup, downloading the required files and keeping up to date with the code on github.
 
-*Somehow my 2013 MacBook Pro will not connect to the wireless network of the RaspBerry Pi. Connecting to the access point with an iPad worked fine, and also the ESP32 modules don't show problems when connecting.*
+_Somehow my 2013 MacBook Pro will not connect to the wireless network of the RaspBerry Pi. Connecting to the access point with an iPad worked fine, and also the ESP32 modules don't show problems when connecting._
 
 ## Running the wifimic server as service
 

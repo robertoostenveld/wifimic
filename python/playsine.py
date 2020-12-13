@@ -16,11 +16,11 @@ stream = p.open(format=pyaudio.paInt16,
                 rate=fs,
                 output=True)
 
-samples = volume * 32767. * (np.sin(2*np.pi*np.arange(fs*duration)*f/fs)+1)/2
+samples = volume * 32767. * (np.sin(2 * np.pi * np.arange(fs * duration) * f / fs) + 1) / 2
 samples = samples.astype(np.uint16)
 samples = samples.tobytes()
 
-# play. May repeat with different volume values (if done interactively) 
+# play. May repeat with different volume values (if done interactively)
 stream.write(samples)
 
 stream.stop_stream()
