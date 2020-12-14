@@ -19,9 +19,11 @@
 
 #define USE_DHCP
 #define CONNECT_LOLIN32
+// #define PRINT_VALUE
 // #define PRINT_RANGE
-// #define PRINT_VOLUME
 #define PRINT_FREQUENCY
+// #define PRINT_VOLUME
+// #define PRINT_HEADER
 #define DO_RECONNECT
 // #define DO_THRESHOLD
 
@@ -236,7 +238,7 @@ void loop() {
       value /= (1 + fabs(value));
       value *= 32767;
 
-#ifdef PRINT_HEADER
+#ifdef PRINT_VALUE
       Serial.println(value);
 #endif
 
