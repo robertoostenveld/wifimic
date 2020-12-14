@@ -47,13 +47,15 @@ class RingBuffer():
                 l1 = self.length - self.pushindex
                 l2 = l - l1
                 self.buffer[-l1:] = dat[0:l1]  # insert this at the end
-                self.buffer[:l2] = dat[l1:]   # insert this at the start
+                self.buffer[:l2] = dat[l1:]    # insert this at the start
             self.pushcount += l
             self.pushindex = self.pushcount % self.length
             # check how many samples we have pushed and popped
             l = self.pushcount - self.popcount
             if l > self.length:
                 logger.debug('overrun in %d' % (self.id))
+                self.popcount = self.pushcount - self.length
+                self.popindex = self.popcount % self.length
         return
 
     def pop(self, l):
@@ -74,7 +76,6 @@ class RingBuffer():
                 dat[-l:] = 0
                 self.popcount -= l
                 self.popindex = self.popcount % self.length
-
         return dat
 
 
@@ -106,12 +107,10 @@ def clientHandler(conn, addr):
 
         if not id in fifo:
             fifo[id] = RingBuffer(id, 22050)
-
         fifo[id].push(dat)
 
         if not id in previous:
             previous[id] = 0
-
         if counter != previous[id] + 1:
             logger.debug('missed packet from %d' % (id))
         previous[id] = counter
