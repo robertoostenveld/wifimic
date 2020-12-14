@@ -85,6 +85,7 @@ void WiFiEvent(WiFiEvent_t event) {
     case SYSTEM_EVENT_STA_DISCONNECTED:
       Serial.println("WiFi lost connection.");
       connected = false;
+      ESP.restart();
       break;
     default: break;
   }
