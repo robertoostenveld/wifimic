@@ -118,7 +118,6 @@ void setup() {
   };
 #endif
 
-
 #ifdef CONNECT_HUZZAH32
   const i2s_pin_config_t pin_config = {
     .bck_io_num = 32,                   // Serial Clock (BCLK on the SPH0645)
