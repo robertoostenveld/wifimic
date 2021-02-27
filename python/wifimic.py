@@ -8,6 +8,7 @@ import threading
 import logging
 import sys
 import os
+import time
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
 logging.basicConfig(level=logging.INFO)
@@ -35,12 +36,14 @@ class RingBuffer():
         self.popcount = 0  # the total number of samples that has been popped
         self.pushindex = 0  # the current sample in the buffer to be pushed
         self.popindex = 0  # the current sample in the buffer to be popped
+        self.lastseen = 0
         self.lock = threading.Lock()  # prevent concurency problems
         logger.info('initialized buffer of %d samples for %d' % (length, id))
 
     def push(self, dat):
         l = len(dat)
         logger.debug('pushed %d samples from %d' % (l, self.id))
+        self.lastseen = time.time()
         with self.lock:
             if self.pushindex + l < self.length:
                 self.buffer[self.pushindex:self.pushindex + l] = dat
@@ -87,8 +90,9 @@ def audioHandler(input, frame_count, time_info, status):
     for id, buffer in fifo.items():
         output += buffer.pop(frame_count)
     if len(fifo)>0:
-      # ensure that the sum of int16 values does not clip
-      output = output / len(fifo)
+        # automatically scale the volume so that it does not clip
+        # the sum of int16 values should not exeed the maximum it can represent
+        output = output / len(fifo)
     output = output.astype(np.int16)
 
     return (output.tobytes(), pyaudio.paContinue)
@@ -117,6 +121,21 @@ def clientHandler(conn, addr):
         if counter != previous[id] + 1:
             logger.debug('missed packet from %d' % (id))
         previous[id] = counter
+
+
+def regularMaintenance():
+    # since the volume scales automatically with the number of microphones to prevent clipping
+    # we should remove old microphones that have gone offline
+    remove = []
+    for id, buffer in fifo.items():
+        toc = time.time() - buffer.lastseen
+        if toc > 15:
+            logger.info('removing buffer for %d' % (id))
+            remove.append(id)
+    for id in remove:
+        del fifo[id]
+    # start this function again after some time
+    threading.Timer(5.0, regularMaintenance).start()
 
 
 if __name__ == '__main__':
@@ -149,6 +168,9 @@ if __name__ == '__main__':
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('', recvPort))
     sock.listen(1)
+
+    # this will run every N seconds
+    regularMaintenance() 
 
     try:
         while True:
