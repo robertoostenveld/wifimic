@@ -36,6 +36,7 @@ class RingBuffer():
         self.pushindex = 0  # the current sample in the buffer to be pushed
         self.popindex = 0  # the current sample in the buffer to be popped
         self.lock = threading.Lock()  # prevent concurency problems
+        logger.info('initialized buffer of %d samples for %d' % (length, id))
 
     def push(self, dat):
         l = len(dat)
@@ -81,17 +82,19 @@ class RingBuffer():
 
 def audioHandler(input, frame_count, time_info, status):
 
-    output = np.zeros(frame_count).astype(np.int16)
+    output = np.zeros(frame_count).astype(np.float64)
 
     for id, buffer in fifo.items():
         output += buffer.pop(frame_count)
+    if len(fifo)>0:
+      # ensure that the sum of int16 values does not clip
+      output = output / len(fifo)
+    output = output.astype(np.int16)
 
     return (output.tobytes(), pyaudio.paContinue)
 
 
 def clientHandler(conn, addr):
-
-    frame_count = 1024
 
     while running:
 
