@@ -8,7 +8,6 @@
 */
 
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <driver/i2s.h>
 #include <endian.h>
 #include <math.h>
@@ -17,15 +16,15 @@
 #include "secret.h" // this contains the ssid and password
 #include "RunningStat.h"
 
+#define LED_BUILTIN 22
 #define USE_DHCP
-#define CONNECT_LOLIN32
-// #define PRINT_VALUE
-// #define PRINT_RANGE
-#define PRINT_FREQUENCY
-// #define PRINT_VOLUME
-// #define PRINT_HEADER
 #define DO_RECONNECT
 // #define DO_THRESHOLD
+// #define PRINT_VALUE
+#define PRINT_RANGE
+// #define PRINT_VOLUME
+// #define PRINT_FREQUENCY
+// #define PRINT_HEADER
 
 #ifndef USE_DHCP
 IPAddress localAddress(192, 168, 4, 2);
@@ -40,7 +39,6 @@ IPAddress serverAddress(192, 168, 4, 1);
 const unsigned int serverPort = 4000;
 const unsigned int recvPort = 4001;
 
-WiFiUDP Udp;    // this is for the local UDP server
 WiFiClient Tcp;
 
 unsigned long blinkTime = 250;
@@ -49,7 +47,8 @@ unsigned long lastThreshold = 0;
 unsigned long thresholdInterval = 250;
 unsigned int reconnectInterval = 10000;
 unsigned long lastConnect = 0;
-bool connected = false;
+bool wifiConnected = false;
+bool tcpConnected = false;
 const unsigned int sampleRate = 22050;
 const unsigned int nMessage = 512; // this can be up to 720 and still fit within the MTU
 const unsigned int nBuffer = 64;
@@ -83,13 +82,19 @@ void WiFiEvent(WiFiEvent_t event) {
       Serial.println("WiFi connected.");
       Serial.println("IP address: ");
       Serial.println(WiFi.localIP());
+      // use the last number of the IP address as identifier
+      message.id = WiFi.localIP()[3];
+      wifiConnected = true;
       break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
       Serial.println("WiFi lost connection.");
-      connected = false;
+      // do not use the last number of the IP address as identifier
+      message.id = 0;
+      wifiConnected = false;
       ESP.restart();
       break;
-    default: break;
+    default: 
+      break;
   }
 }
 
@@ -98,8 +103,6 @@ void setup() {
 
   Serial.begin(115200);
 
-#ifdef CONNECT_LOLIN32
-#define LED_BUILTIN 22
   pinMode(32, OUTPUT); digitalWrite(32, HIGH);  // L/R
   pinMode(35, OUTPUT); digitalWrite(35, HIGH);  // VDD
 
@@ -109,25 +112,6 @@ void setup() {
     .data_out_num = I2S_PIN_NO_CHANGE,  // not used     (only for speakers)
     .data_in_num = 26                   // Serial Data  (SD on the INMP441)
   };
-#endif
-
-#ifdef CONNECT_NODEMCU32
-  const i2s_pin_config_t pin_config = {
-    .bck_io_num = 13,                   // Serial Clock (SCK on the INMP441)
-    .ws_io_num = 15,                    // Word Select  (WS on the INMP441)
-    .data_out_num = I2S_PIN_NO_CHANGE,  // not used     (only for speakers)
-    .data_in_num = 21                   // Serial Data  (SD on the INMP441)
-  };
-#endif
-
-#ifdef CONNECT_HUZZAH32
-  const i2s_pin_config_t pin_config = {
-    .bck_io_num = 32,                   // Serial Clock (BCLK on the SPH0645)
-    .ws_io_num = 22,                    // Word Select  (LRCL on the SPH0645)
-    .data_out_num = I2S_PIN_NO_CHANGE,  // not used     (only for speakers)
-    .data_in_num = 14                   // Serial Data  (DOUT on the SPH0645)
-  };
-#endif
 
   // initialize status LED
   pinMode(LED_BUILTIN, OUTPUT);
@@ -189,9 +173,6 @@ void setup() {
     while (true);
   }
   Serial.println("I2S pins set.");
-
-  // use the last number of the IP address as identifier
-  message.id = WiFi.localIP()[3];
 
   for (int i; i < sampleRate; i++) {
     err = i2s_read(I2S_PORT, buffer, 4, &bytes_read, 0);
@@ -269,6 +250,7 @@ void loop() {
 
 #ifdef PRINT_HEADER
       Serial.print(message.version); Serial.print(", ");
+      Serial.print(message.id); Serial.print(", ");
       Serial.print(message.counter); Serial.print(", ");
       Serial.print(message.samples); Serial.print(", ");
       Serial.print(message.data[0]); Serial.println();
@@ -283,9 +265,9 @@ void loop() {
         digitalWrite(LED_BUILTIN, LOW);
         lastBlink = millis();
 
-        if (!connected) {
-          connected = Tcp.connect(serverAddress, serverPort);
-          if (connected) {
+        if (wifiConnected && !tcpConnected) {
+          tcpConnected = Tcp.connect(serverAddress, serverPort);
+          if (tcpConnected) {
             Serial.print("Connected to ");
             Serial.println(serverAddress);
           }
@@ -298,7 +280,7 @@ void loop() {
 #endif
 
 
-      if (connected) {
+      if (wifiConnected && tcpConnected) {
         blinkTime = 1000;
 
 #ifdef DO_THRESHOLD
@@ -313,7 +295,7 @@ void loop() {
 
         if (aboveThreshold) {
           int count = Tcp.write((uint8_t *)(&message), sizeof(message));
-          connected = (count == sizeof(message));
+          tcpConnected = (count == sizeof(message));
         }
       }
       else {
