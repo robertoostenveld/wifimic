@@ -14,10 +14,14 @@ logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('wifimic')
 
-total = 0
+# an amplitude of 1 passes the 16 bit signal from the wifi micriophones as-is
+# which can be too "hot" for the microphone input
+amplitude = 1/16
+
 recvPort = 4000
 sendPort = 4001
 fifo = {}
+fifolock = threading.Lock()
 previous = {}
 running = True
 clients = []
@@ -87,13 +91,14 @@ def audioHandler(input, frame_count, time_info, status):
 
     output = np.zeros(frame_count).astype(np.float64)
 
-    for id, buffer in fifo.items():
-        output += buffer.pop(frame_count)
-    if len(fifo)>0:
-        # automatically scale the volume so that it does not clip
-        # the sum of int16 values should not exeed the maximum it can represent
-        output = output / len(fifo)
-    output = output.astype(np.int16)
+    with fifolock:
+        for id, buffer in fifo.items():
+            output += buffer.pop(frame_count)*amplitude
+        if len(fifo)>0:
+            # automatically scale the volume so that it does not clip
+            # the sum of int16 values should not exeed the maximum it can represent
+            output = output / len(fifo)
+        output = output.astype(np.int16)
 
     return (output.tobytes(), pyaudio.paContinue)
 
@@ -112,9 +117,10 @@ def clientHandler(conn, addr):
             buf += conn.recv(samples * 2 - len(buf))
         dat = np.frombuffer(bytearray(buf), dtype=np.int16)
 
-        if not id in fifo:
-            fifo[id] = RingBuffer(id, 22050)
-        fifo[id].push(dat)
+        with fifolock:
+             if not id in fifo:
+                 fifo[id] = RingBuffer(id, 22050)
+             fifo[id].push(dat)
 
         if not id in previous:
             previous[id] = 0
@@ -127,13 +133,14 @@ def regularMaintenance():
     # since the volume scales automatically with the number of microphones to prevent clipping
     # we should remove old microphones that have gone offline
     remove = []
-    for id, buffer in fifo.items():
-        toc = time.time() - buffer.lastseen
-        if toc > 15:
-            logger.info('removing buffer for %d' % (id))
-            remove.append(id)
-    for id in remove:
-        del fifo[id]
+    with fifolock:
+        for id, buffer in fifo.items():
+            toc = time.time() - buffer.lastseen
+            if toc > 15:
+                logger.info('removing buffer for %d' % (id))
+                remove.append(id)
+        for id in remove:
+            del fifo[id]
     # start this function again after some time
     threading.Timer(5.0, regularMaintenance).start()
 
