@@ -19,12 +19,21 @@
 #define LED_BUILTIN 22
 #define USE_DHCP
 #define DO_RECONNECT
+#define DO_FILTER
+// #define DO_LIMITER
 // #define DO_THRESHOLD
 // #define PRINT_VALUE
-#define PRINT_RANGE
+// #define PRINT_RANGE
 // #define PRINT_VOLUME
 // #define PRINT_FREQUENCY
 // #define PRINT_HEADER
+
+#ifdef DO_FILTER
+#include <IIRFilter.h>    // See https://github.com/tttapa/Filters
+const double b_coefficients[] = {0.049261, -0.000000, -0.147783, -0.000000, 0.147783, -0.000000, -0.049261};
+const double a_coefficients[] = {1.000000, -4.038586, 6.833250, -6.350717, 3.497524, -1.079855, 0.138470};
+IIRFilter iir(b_coefficients, a_coefficients);
+#endif
 
 #ifndef USE_DHCP
 IPAddress localAddress(192, 168, 4, 2);
@@ -55,8 +64,14 @@ const unsigned int nBuffer = 64;
 bool meanInitialized = 0;
 const double alpha = 10. / sampleRate; // if the sampling time dT is much smaller than the time constant T, then alpha=1/(T*sampleRate) and T=1/(alpha*sampleRate)
 double signalMean = sqrt(-1); // initialize as not-a-number
-double signalScale = 1000;
-double volumeThreshold = 55;
+const double signalDivider = 8192;
+const double volumeThreshold = 55;
+
+/* 
+ *  With a divider of 2^13=8192 the signal never clips. In this case the limiter is not needed.
+ *  With a divider of 2^12=4096 the signal does not clip often, but it still happens occasionally.
+ *  With lower values for the divider, the limiter is certainly needed.
+ */
 
 struct message_t {
   uint32_t version = 1;
@@ -93,7 +108,7 @@ void WiFiEvent(WiFiEvent_t event) {
       wifiConnected = false;
       ESP.restart();
       break;
-    default: 
+    default:
       break;
   }
 }
@@ -190,8 +205,8 @@ void loop() {
     digitalWrite(LED_BUILTIN, HIGH);
   }
 
+  // how many audio samples do we still need to fill the next message?
   size_t samples = nMessage - message.samples;
-
   if (samples > nBuffer) {
     // do not read more than nBuffer at a time
     samples = nBuffer;
@@ -212,12 +227,18 @@ void loop() {
         signalMean = alpha * value + (1 - alpha) * signalMean;
       }
       value -= signalMean;
-      value /= signalScale;
+      value /= signalDivider;
 
+#ifdef DO_FILTER
+      value = iir.filter(value);
+#endif
+
+#ifdef DO_LIMITER
       // https://en.wikipedia.org/wiki/Sigmoid_function
       value /= 32767;
       value /= (1 + fabs(value));
       value *= 32767;
+#endif
 
 #ifdef PRINT_VALUE
       Serial.println(value);
