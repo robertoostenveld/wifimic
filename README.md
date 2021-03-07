@@ -1,5 +1,9 @@
 # wifimic
 
+![photo](./pictures/photo.jpg)
+
+See my [blog](https://robertoostenveld.nl/wireless-classroom-conference-microphone-system/) for a series of posts that describes this in more detail.
+
 ## Preparing the Raspberry Pi zero w
 
 I used the regular instructions to install Raspbian "Buster". Subsequently I did
@@ -52,4 +56,4 @@ _Somehow my 2013 MacBook Pro will not connect to the wireless network of the Ras
 
 ## Running the wifimic server as service
 
-The wifimic server should start with the system and should always be running. I am using systemd for that, following these [instructions](https://www.raspberrypi.org/documentation/linux/usage/systemd.md).
+The wifimic server should start with the system and should always be running. I am using `systemd` for that, following these [instructions](https://www.raspberrypi.org/documentation/linux/usage/systemd.md).
