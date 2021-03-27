@@ -19,12 +19,12 @@
 #define LED_BUILTIN 22
 #define USE_DHCP
 #define DO_RECONNECT
-#define DO_FILTER
-// #define DO_LIMITER
+// #define DO_FILTER
+#define DO_LIMITER
 // #define DO_THRESHOLD
 // #define PRINT_VALUE
 // #define PRINT_RANGE
-// #define PRINT_VOLUME
+#define PRINT_VOLUME
 // #define PRINT_FREQUENCY
 // #define PRINT_HEADER
 
@@ -43,7 +43,7 @@ IPAddress primaryDNS(8, 8, 8, 8);   //optional
 IPAddress secondaryDNS(8, 8, 4, 4); //optional
 #endif
 
-IPAddress serverAddress(192, 168, 4, 1);
+IPAddress serverAddress(192, 168, 1, 33);
 
 const unsigned int serverPort = 4000;
 const unsigned int recvPort = 4001;
@@ -53,22 +53,25 @@ WiFiClient Tcp;
 unsigned long blinkTime = 250;
 unsigned long lastBlink = 0;
 unsigned long lastThreshold = 0;
-unsigned long thresholdInterval = 250;
-unsigned int reconnectInterval = 10000;
+unsigned long thresholdInterval = 500;
+unsigned int reconnectInterval = 5000;
 unsigned long lastConnect = 0;
 bool wifiConnected = false;
 bool tcpConnected = false;
-const unsigned int sampleRate = 22050;
-const unsigned int nMessage = 512; // this can be up to 720 and still fit within the MTU
+const unsigned int sampleRate = 44100;
+const unsigned int nMessage = 720; // this can be up to 720 and still fit within the MTU
 const unsigned int nBuffer = 64;
 bool meanInitialized = 0;
 const double alpha = 10. / sampleRate; // if the sampling time dT is much smaller than the time constant T, then alpha=1/(T*sampleRate) and T=1/(alpha*sampleRate)
 double signalMean = sqrt(-1); // initialize as not-a-number
-const double signalDivider = 8192;
-const double volumeThreshold = 55;
 
+const double dbMax = 90.3;            // this is the loudest that an int16 signal can get
+const double volumeThreshold = -40;   // relative to the maxiumum
+
+const double signalDivider = pow(2, 12);
 /* 
- *  With a divider of 2^13=8192 the signal never clips. In this case the limiter is not needed.
+ *  With a divider of 2^16=8192 blowing hard into the mic still does not clips. In this case the limiter is not needed.
+ *  With a divider of 2^13=8192 normal speech never clips. In this case the limiter is not needed.
  *  With a divider of 2^12=4096 the signal does not clip often, but it still happens occasionally.
  *  With lower values for the divider, the limiter is certainly needed.
  */
@@ -235,9 +238,9 @@ void loop() {
 
 #ifdef DO_LIMITER
       // https://en.wikipedia.org/wiki/Sigmoid_function
-      value /= 32767;
+      value /= 32768;
       value /= (1 + fabs(value));
-      value *= 32767;
+      value *= 32768;
 #endif
 
 #ifdef PRINT_VALUE
@@ -266,7 +269,7 @@ void loop() {
 #endif
 
 #ifdef PRINT_VOLUME
-      Serial.println(10 * log10(shortstat.Variance()));
+      Serial.println(10 * log10(shortstat.Variance()) - dbMax);
 #endif
 
 #ifdef PRINT_HEADER
@@ -278,8 +281,8 @@ void loop() {
 #endif
 
 #ifdef DO_RECONNECT
-      if  ((millis() - lastConnect) > reconnectInterval) {
-        // reconnect, but don't try to reconnect too often
+      if  (lastConnect==0 || (millis() - lastConnect) > reconnectInterval) {
+        // reconnect to TCP, but don't try to reconnect too often
         lastConnect = millis();
 
         // turn the status LED on
@@ -305,7 +308,7 @@ void loop() {
         blinkTime = 1000;
 
 #ifdef DO_THRESHOLD
-        bool aboveThreshold = (10 * log10(shortstat.Variance()) > volumeThreshold);
+        bool aboveThreshold = (10 * log10(shortstat.Variance() - dbMax) > volumeThreshold);
         if (aboveThreshold)
           lastThreshold = millis();
         else if ((millis() - lastThreshold) < thresholdInterval)
@@ -319,7 +322,12 @@ void loop() {
           tcpConnected = (count == sizeof(message));
         }
       }
-      else {
+      else if (!wifiConnected) {
+        Serial.println("not connected to wifi");
+        blinkTime = 250;
+      }
+      else if (!tcpConnected) {
+        Serial.println("not connected to tcp");
         blinkTime = 250;
       }
 
