@@ -6,7 +6,6 @@ import struct
 import numpy as np
 import threading
 import logging
-import sys
 import os
 import time
 
@@ -14,9 +13,14 @@ logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('wifimic')
 
-# an amplitude of 1 passes the 16 bit signal from the wifi micriophones as-is
+# an amplitude of 1 passes the 16-bit signal from the wifi micriophones as-is
 # which can be too "hot" for the microphone input
-amplitude = 1/16
+amplitude  = 1.0
+
+device = 9
+rate = 44100
+format = pyaudio.paFloat32
+channels = 4
 
 recvPort = 4000
 sendPort = 4001
@@ -37,9 +41,9 @@ class RingBuffer():
         self.length = length
         self.buffer = np.zeros(length, dtype=np.int16)
         self.pushcount = 0  # the total number of samples that has been pushed
-        self.popcount = 0  # the total number of samples that has been popped
+        self.popcount = 0   # the total number of samples that has been popped
         self.pushindex = 0  # the current sample in the buffer to be pushed
-        self.popindex = 0  # the current sample in the buffer to be popped
+        self.popindex = 0   # the current sample in the buffer to be popped
         self.lastseen = 0
         self.lock = threading.Lock()  # prevent concurency problems
         logger.info('initialized buffer of %d samples for %d' % (length, id))
@@ -89,17 +93,41 @@ class RingBuffer():
 
 def audioHandler(input, frame_count, time_info, status):
 
-    output = np.zeros(frame_count).astype(np.float64)
+    output = np.zeros((frame_count, channels), dtype=np.float32)
 
     with fifolock:
+        # if a single output channel is configured, the microphones will be mixed up
+        # if multiple output channels are configured, each microphone will go to its own channel
+        chanindx = 0
         for id, buffer in fifo.items():
-            output += buffer.pop(frame_count)*amplitude
-        if len(fifo)>0:
+            if chanindx<channels:
+                output[:,chanindx] += buffer.pop(frame_count)*amplitude
+            else:
+                raise RuntimeError('there are more microphones than output channels')
+            if channels>1:
+                # only increment if there are multiple output channels, otherwise stick to the first channel
+                chanindx += 1
+        if channels==1 and len(fifo)>0:
             # automatically scale the volume so that it does not clip
             # the sum of int16 values should not exeed the maximum it can represent
             output = output / len(fifo)
-        output = output.astype(np.int16)
+        if format==pyaudio.paFloat32:
+            # scale between -1.0 and 1.0
+            output = output/32768.
+        elif format==pyaudio.paInt16:
+            # keep as it is
+            output = output
+        elif format==pyaudio.paInt8:
+            # scale between -128 and 127
+            output = output/256.
 
+    if format==pyaudio.paFloat32:
+        output = output.astype(np.float32)
+    elif format==pyaudio.paInt16:
+        output = output.astype(np.int16)
+    elif format==pyaudio.paInt8:
+        output = output.astype(np.int8)
+ 
     return (output.tobytes(), pyaudio.paContinue)
 
 
@@ -119,7 +147,7 @@ def clientHandler(conn, addr):
 
         with fifolock:
              if not id in fifo:
-                 fifo[id] = RingBuffer(id, 22050)
+                 fifo[id] = RingBuffer(id, rate) # make a buffer for 22050 or 44100 samples
              fifo[id].push(dat)
 
         if not id in previous:
@@ -162,11 +190,11 @@ if __name__ == '__main__':
                         p.get_device_info_by_host_api_device_index(0, i).get('name'))
     logger.info('------------------------------------------------------------------')
 
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=1,
-                    rate=22050,
+    stream = p.open(format=format,
+                    channels=channels,
+                    rate=rate,
                     output=True,
-                    output_device_index=0,
+                    output_device_index=device,
                     stream_callback=audioHandler)
 
     stream.start_stream()
@@ -177,7 +205,7 @@ if __name__ == '__main__':
     sock.listen(1)
 
     # this will run every N seconds
-    regularMaintenance() 
+    regularMaintenance()
 
     try:
         while True:
