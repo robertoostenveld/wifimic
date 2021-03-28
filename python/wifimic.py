@@ -20,7 +20,7 @@ amplitude  = 1.0
 device = 9
 rate = 44100
 format = pyaudio.paFloat32
-channels = 4
+channels = 8
 
 recvPort = 4000
 sendPort = 4001

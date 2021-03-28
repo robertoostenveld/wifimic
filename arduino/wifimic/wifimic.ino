@@ -20,13 +20,14 @@
 #define USE_DHCP
 #define DO_RECONNECT
 // #define DO_FILTER
-#define DO_LIMITER
+// #define DO_LIMITER
 // #define DO_THRESHOLD
 // #define PRINT_VALUE
 // #define PRINT_RANGE
-#define PRINT_VOLUME
+// #define PRINT_VOLUME
 // #define PRINT_FREQUENCY
 // #define PRINT_HEADER
+#define PRINT_ELAPSED
 
 #ifdef DO_FILTER
 #include <IIRFilter.h>    // See https://github.com/tttapa/Filters
@@ -56,21 +57,20 @@ unsigned long lastThreshold = 0;
 unsigned long thresholdInterval = 500;
 unsigned int reconnectInterval = 5000;
 unsigned long lastConnect = 0;
+unsigned long thisPacket, lastPacket;
 bool wifiConnected = false;
 bool tcpConnected = false;
 const unsigned int sampleRate = 44100;
-const unsigned int nMessage = 720; // this can be up to 720 and still fit within the MTU
-const unsigned int nBuffer = 64;
+const unsigned int nMessage = 720;      // this can be up to 720 and still fit within the MTU of 1500 bytes
+const unsigned int nBuffer = 720;       // minimum 8, maximum 1024
 bool meanInitialized = 0;
-const double alpha = 10. / sampleRate; // if the sampling time dT is much smaller than the time constant T, then alpha=1/(T*sampleRate) and T=1/(alpha*sampleRate)
-double signalMean = sqrt(-1); // initialize as not-a-number
-
-const double dbMax = 90.3;            // this is the loudest that an int16 signal can get
-const double volumeThreshold = -40;   // relative to the maxiumum
-
+const double alpha = 10. / sampleRate;  // if the sampling time dT is much smaller than the time constant T, then alpha=1/(T*sampleRate) and T=1/(alpha*sampleRate)
+double signalMean = sqrt(-1);           // initialize as not-a-number
+const double dbMax = 90.3;              // this is the loudest that an int16 signal can get
+const double volumeThreshold = -40;     // relative to the maxiumum
 const double signalDivider = pow(2, 12);
 /* 
- *  With a divider of 2^16=8192 blowing hard into the mic still does not clips. In this case the limiter is not needed.
+ *  With a divider of 2^16=65536 blowing hard into the mic still does not clips. In this case the limiter is not needed.
  *  With a divider of 2^13=8192 normal speech never clips. In this case the limiter is not needed.
  *  With a divider of 2^12=4096 the signal does not clip often, but it still happens occasionally.
  *  With lower values for the divider, the limiter is certainly needed.
@@ -173,7 +173,8 @@ void setup() {
     .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,           // interrupt level 1
     .dma_buf_count = 16,                                // number of buffers, 128 max.
-    .dma_buf_len = nBuffer                              // samples per buffer (minimum is 8)
+    .dma_buf_len = nBuffer,                             // samples per buffer (minimum is 8)
+    .use_apll = false
   };
 
   // Configuring the I2S driver and pins.
@@ -278,6 +279,12 @@ void loop() {
       Serial.print(message.counter); Serial.print(", ");
       Serial.print(message.samples); Serial.print(", ");
       Serial.print(message.data[0]); Serial.println();
+#endif
+
+#ifdef PRINT_ELAPSED
+    thisPacket = millis();
+    Serial.println(thisPacket-lastPacket);
+    lastPacket = thisPacket;
 #endif
 
 #ifdef DO_RECONNECT
