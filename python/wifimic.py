@@ -146,26 +146,21 @@ def messageHandler(conn):
     # this is to deal with a single incoming TCP or UDP message
     global samples
 
-    if samples==0:
-        buf = sock.recv(16)
-        while len(buf) < 16:
-            buf += conn.recv(16 - len(buf))
-        (version, id, counter, samples) = struct.unpack('IIII', buf[0:16])
-        buf = conn.recv(samples * 2)
-        while len(buf) < samples * 2:
-            buf += conn.recv(samples * 2 - len(buf))
-    else:
-        buf = sock.recv(16 + samples*2)
-        while len(buf) < 16 + samples * 2:
-            buf += conn.recv(16 + samples * 2 - len(buf))
-        (version, id, counter, samples) = struct.unpack('IIII', buf[0:16])
-        buf = buf[16:]
+    # the packet will not be 2048 bytes long, but depends on the number of audio samples
+    buf = sock.recv(2048)
+    if len(buf)<12:
+        return
 
-    dat = np.frombuffer(bytearray(buf), dtype=np.int16)
+    (byte0, byte1, counter, timestamp, id) = struct.unpack('BBHII', buf[0:12])
+    if byte0!=128 or byte1!=11:
+        return
+    
+    dat = np.frombuffer(bytearray(buf[12:]), dtype=np.int16)
+    samples = len(dat)
 
     with fifolock:
          if not id in fifo:
-             fifo[id] = RingBuffer(id, rate) # make a buffer for 22050 or 44100 samples
+             fifo[id] = RingBuffer(id, rate) # make a buffer that can hold one second
          if not id in previous:
              previous[id] = 0
              missed[id] = 0
@@ -188,6 +183,7 @@ def tcpClientHandler(conn, addr):
 
 
 def regularMaintenance():
+    print(missed)
     
     # since the volume scales automatically with the number of microphones to prevent clipping
     # we should remove old microphones that have gone offline
@@ -205,7 +201,8 @@ def regularMaintenance():
 
     # send a broadcast UDP message with the server timestamp
     timestamp = round(time.monotonic()*1000)
-    timestamp = struct.pack('>I', timestamp)
+    logger.info("server timestamp = %d" % timestamp)
+    timestamp = struct.pack('!I', timestamp)
     clocksync.sendto(timestamp, ('<broadcast>', syncPort))
     
     # start this function again after some time

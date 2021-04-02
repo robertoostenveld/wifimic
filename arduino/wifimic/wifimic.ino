@@ -67,6 +67,9 @@ bool wifiConnected = false, tcpConnected = false, udpConnected = false;
 const unsigned int sampleRate = 44100;
 const unsigned int nMessage = 720;      // this can be up to 720 and still fit within the MTU of 1500 bytes
 const unsigned int nBuffer = 720;       // minimum 8, maximum 1024
+unsigned int samplesReady = 0;
+long timestampOffset = 0;
+float timestampSlope = 1;
 bool meanInitialized = 0;
 const double alpha = 10. / sampleRate;  // if the sampling time dT is much smaller than the time constant T, then alpha=1/(T*sampleRate) and T=1/(alpha*sampleRate)
 double signalMean = sqrt(-1);           // initialize as not-a-number
@@ -75,16 +78,23 @@ const double volumeThreshold = -40;     // relative to the maxiumum
 const double signalDivider = pow(2, 12);
 /*
     With a divider of 2^16=65536 blowing hard into the mic still does not clips. In this case the limiter is not needed.
-    With a divider of 2^13=8192 normal speech never clips. In this case the limiter is not needed.
-    With a divider of 2^12=4096 the signal does not clip often, but it still happens occasionally.
+    With a divider of 2^13=8192 normal speech does not clips. In this case the limiter is not needed.
+    With a divider of 2^12=4096 the signal occasionally clips.
     With lower values for the divider, the limiter is certainly needed.
 */
 
+// see https://en.wikipedia.org/wiki/Real-time_Transport_Protocol
 struct message_t {
-  uint32_t version = 1;
+  // the format of the packet header is always the same
+  uint8_t byte0 = 2 << 6;  // the RTP version is 2
+  uint8_t byte1 = 11;      // the RTP type is 0, 8, or 11
+  uint16_t counter = 0;
+  uint32_t timestamp = 0;
   uint32_t id = 0;
-  uint32_t counter;
-  uint32_t samples;
+  // the data is represented as follows
+  // type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ -Law audio 64 kbit/s              RFC 3551
+  // type=8  PCMA  audio 1 8000  any 20  ITU-T G.711 PCM A-Law audio 64 kbit/s               RFC 3551
+  // type=11 L16   audio 1 44100 any 20  Linear PCM 16-bit audio 705.6 kbit/s, uncompressed  RFC 3551, Page 27
   int16_t data[nMessage];
 } message __attribute__((packed));
 
@@ -126,9 +136,6 @@ void WiFiEvent(WiFiEvent_t event) {
       break;
   }
 }
-
-long timestampOffset = 0;
-float timestampSlope = 1;
 
 unsigned long getTimestamp() {
   float timestamp = millis();
@@ -265,16 +272,20 @@ void loop() {
   }
 
   // how many audio samples do we still need to fill the next message?
-  size_t samples = nMessage - message.samples;
-  if (samples > nBuffer) {
+  size_t samplesNeeded = nMessage - samplesReady;
+  if (samplesNeeded > nBuffer) {
     // do not read more than nBuffer at a time
-    samples = nBuffer;
+    samplesNeeded = nBuffer;
   }
 
-  err = i2s_read(I2S_PORT, buffer, samples * 4, &bytes_read, 0);
+  err = i2s_read(I2S_PORT, buffer, samplesNeeded * 4, &bytes_read, 0);
 
   if (err == ESP_OK) {
     for (unsigned int sample; sample < bytes_read / 4; sample++) {
+
+      if (message.timestamp == 0) {
+        message.timestamp = getTimestamp();
+      }
 
       double value = buffer[sample];
 
@@ -303,14 +314,14 @@ void loop() {
       Serial.println(value);
 #endif
 
-      message.data[message.samples] = value; // this casts the value to an int16
-      message.samples++;
+      message.data[samplesReady] = value; // this casts the value to an int16
+      samplesReady++;
 
       shortstat.Push(value);
       longstat.Push(value);
     }
 
-    if (message.samples == nMessage) {
+    if (samplesReady == nMessage) {
 
 #ifdef PRINT_RANGE
       Serial.print(shortstat.Min());
@@ -329,10 +340,11 @@ void loop() {
 #endif
 
 #ifdef PRINT_HEADER
-      Serial.print(message.version); Serial.print(", ");
-      Serial.print(message.id); Serial.print(", ");
+      Serial.print(message.byte0); Serial.print(", ");
+      Serial.print(message.byte1); Serial.print(", ");
       Serial.print(message.counter); Serial.print(", ");
-      Serial.print(message.samples); Serial.println();
+      Serial.print(message.timestamp); Serial.print(", ");
+      Serial.println(message.id);
 #endif
 
 #ifdef PRINT_ELAPSED
@@ -407,7 +419,8 @@ void loop() {
 
       shortstat.Clear();
       message.counter++;
-      message.samples = 0;
+      message.timestamp = 0;
+      samplesReady = 0;
     }
   }
 
