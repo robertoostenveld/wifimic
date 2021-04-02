@@ -22,15 +22,26 @@ rate = 44100
 format = pyaudio.paFloat32
 channels = 8
 
-recvPort = 4000
-sendPort = 4001
+USE_TCP = False
+tcpPort = 4000
+udpPort = 4001
+syncPort = 4002
+
+samples = 0
+
 fifo = {}
 fifolock = threading.Lock()
 previous = {}
+missed = {}
 running = True
 clients = []
 threads = []
 
+# this is used to send UDP packets with the server timestamp
+clocksync = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+clocksync.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+clocksync.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+clocksync.settimeout(0.2)
 
 class RingBuffer():
     """Class for a FIFO buffer
@@ -92,7 +103,7 @@ class RingBuffer():
 
 
 def audioHandler(input, frame_count, time_info, status):
-
+    # this is called whenever the audio card needs new data
     output = np.zeros((frame_count, channels), dtype=np.float32)
 
     with fifolock:
@@ -131,33 +142,53 @@ def audioHandler(input, frame_count, time_info, status):
     return (output.tobytes(), pyaudio.paContinue)
 
 
-def clientHandler(conn, addr):
+def messageHandler(conn):
+    # this is to deal with a single incoming TCP or UDP message
+    global samples
 
-    while running:
-
-        buf = conn.recv(16)
+    if samples==0:
+        buf = sock.recv(16)
         while len(buf) < 16:
             buf += conn.recv(16 - len(buf))
         (version, id, counter, samples) = struct.unpack('IIII', buf[0:16])
-
         buf = conn.recv(samples * 2)
         while len(buf) < samples * 2:
             buf += conn.recv(samples * 2 - len(buf))
-        dat = np.frombuffer(bytearray(buf), dtype=np.int16)
+    else:
+        buf = sock.recv(16 + samples*2)
+        while len(buf) < 16 + samples * 2:
+            buf += conn.recv(16 + samples * 2 - len(buf))
+        (version, id, counter, samples) = struct.unpack('IIII', buf[0:16])
+        buf = buf[16:]
 
-        with fifolock:
-             if not id in fifo:
-                 fifo[id] = RingBuffer(id, rate) # make a buffer for 22050 or 44100 samples
-             fifo[id].push(dat)
+    dat = np.frombuffer(bytearray(buf), dtype=np.int16)
 
-        if not id in previous:
-            previous[id] = 0
-        if counter != previous[id] + 1:
-            logger.debug('missed packet from %d' % (id))
-        previous[id] = counter
+    with fifolock:
+         if not id in fifo:
+             fifo[id] = RingBuffer(id, rate) # make a buffer for 22050 or 44100 samples
+         if not id in previous:
+             previous[id] = 0
+             missed[id] = 0
+         else:
+             for missing in range(counter - previous[id] -1):
+                 logger.debug('missed packet from %d' % (id))
+                 missed[id] += 1
+                 noise = np.random.random(samples) # FIXME
+                 noise *= np.linalg.norm(dat)/np.linalg.norm(noise)
+                 fifo[id].push(noise.astype(np.int16))
+         fifo[id].push(dat)
+
+    previous[id] = counter
+    
+
+def tcpClientHandler(conn, addr):
+    # this is to deal with a connected TCP client 
+    while running:
+        messageHandler(conn)
 
 
 def regularMaintenance():
+    
     # since the volume scales automatically with the number of microphones to prevent clipping
     # we should remove old microphones that have gone offline
     remove = []
@@ -169,8 +200,16 @@ def regularMaintenance():
                 remove.append(id)
         for id in remove:
             del fifo[id]
+            del previous[id]
+            del missed[id]
+
+    # send a broadcast UDP message with the server timestamp
+    timestamp = round(time.monotonic()*1000)
+    timestamp = struct.pack('>I', timestamp)
+    clocksync.sendto(timestamp, ('<broadcast>', syncPort))
+    
     # start this function again after some time
-    threading.Timer(5.0, regularMaintenance).start()
+    threading.Timer(2.0, regularMaintenance).start()
 
 
 if __name__ == '__main__':
@@ -197,25 +236,34 @@ if __name__ == '__main__':
                     output_device_index=device,
                     stream_callback=audioHandler)
 
-    stream.start_stream()
+    # stream.start_stream()
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('', recvPort))
-    sock.listen(1)
+    if USE_TCP:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('', tcpPort))
+        sock.listen(1)
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.bind(('', udpPort))
+
 
     # this will run every N seconds
     regularMaintenance()
 
     try:
         while True:
-            conn, addr = sock.accept()
-            if not addr in clients:
-                logger.info('Got connection from %s on %d' % addr)
-                thread = threading.Thread(target=clientHandler, args=(conn, addr))
-                clients.append(addr)
-                threads.append(thread)
+            if USE_TCP:
+                conn, addr = sock.accept()
+                if not addr in clients:
+                    logger.info('Got connection from %s on %d' % addr)
+                    thread = threading.Thread(target=tcpClientHandler, args=(conn, addr))
+                    clients.append(addr)
+                    threads.append(thread)
                 thread.start()
+            else:
+                messageHandler(sock)
+                
 
     except (SystemExit, KeyboardInterrupt, RuntimeError):
         logger.info('Stopping')

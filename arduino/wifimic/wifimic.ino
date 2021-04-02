@@ -12,22 +12,27 @@
 #include <endian.h>
 #include <math.h>
 #include <limits.h>
+#include <WiFiUdp.h>
+#include <AsyncUDP.h>
 
 #include "secret.h" // this contains the ssid and password
 #include "RunningStat.h"
 
 #define LED_BUILTIN 22
 #define USE_DHCP
-#define DO_RECONNECT
+#define USE_UDP
+// #define USE_TCP
+// #define DO_RECONNECT
 // #define DO_FILTER
 // #define DO_LIMITER
 // #define DO_THRESHOLD
+#define DO_CLOCKSYNC
 // #define PRINT_VALUE
 // #define PRINT_RANGE
 // #define PRINT_VOLUME
 // #define PRINT_FREQUENCY
 // #define PRINT_HEADER
-#define PRINT_ELAPSED
+// #define PRINT_ELAPSED
 
 #ifdef DO_FILTER
 #include <IIRFilter.h>    // See https://github.com/tttapa/Filters
@@ -37,8 +42,8 @@ IIRFilter iir(b_coefficients, a_coefficients);
 #endif
 
 #ifndef USE_DHCP
-IPAddress localAddress(192, 168, 4, 2);
-IPAddress gateway(192, 168, 4, 1);
+IPAddress localAddress(192, 168, 1, 100);
+IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 0, 0);
 IPAddress primaryDNS(8, 8, 8, 8);   //optional
 IPAddress secondaryDNS(8, 8, 4, 4); //optional
@@ -46,20 +51,19 @@ IPAddress secondaryDNS(8, 8, 4, 4); //optional
 
 IPAddress serverAddress(192, 168, 1, 33);
 
-const unsigned int serverPort = 4000;
-const unsigned int recvPort = 4001;
+const unsigned int tcpPort = 4000;
+const unsigned int udpPort = 4001;
 
 WiFiClient Tcp;
+WiFiUDP Udp;
 
-unsigned long blinkTime = 250;
-unsigned long lastBlink = 0;
-unsigned long lastThreshold = 0;
+unsigned long blinkInterval = 250;
 unsigned long thresholdInterval = 500;
-unsigned int reconnectInterval = 5000;
-unsigned long lastConnect = 0;
+unsigned int maintenanceInterval = 5000;
+unsigned long lastBlink = 0, lastThreshold = 0, lastConnect = 0, lastClock = 0;
+unsigned long offset = 0;
 unsigned long thisPacket, lastPacket;
-bool wifiConnected = false;
-bool tcpConnected = false;
+bool wifiConnected = false, tcpConnected = false, udpConnected = false;
 const unsigned int sampleRate = 44100;
 const unsigned int nMessage = 720;      // this can be up to 720 and still fit within the MTU of 1500 bytes
 const unsigned int nBuffer = 720;       // minimum 8, maximum 1024
@@ -69,12 +73,12 @@ double signalMean = sqrt(-1);           // initialize as not-a-number
 const double dbMax = 90.3;              // this is the loudest that an int16 signal can get
 const double volumeThreshold = -40;     // relative to the maxiumum
 const double signalDivider = pow(2, 12);
-/* 
- *  With a divider of 2^16=65536 blowing hard into the mic still does not clips. In this case the limiter is not needed.
- *  With a divider of 2^13=8192 normal speech never clips. In this case the limiter is not needed.
- *  With a divider of 2^12=4096 the signal does not clip often, but it still happens occasionally.
- *  With lower values for the divider, the limiter is certainly needed.
- */
+/*
+    With a divider of 2^16=65536 blowing hard into the mic still does not clips. In this case the limiter is not needed.
+    With a divider of 2^13=8192 normal speech never clips. In this case the limiter is not needed.
+    With a divider of 2^12=4096 the signal does not clip often, but it still happens occasionally.
+    With lower values for the divider, the limiter is certainly needed.
+*/
 
 struct message_t {
   uint32_t version = 1;
@@ -100,21 +104,60 @@ void WiFiEvent(WiFiEvent_t event) {
       Serial.println("WiFi connected.");
       Serial.println("IP address: ");
       Serial.println(WiFi.localIP());
-      // use the last number of the IP address as identifier
+#ifdef USE_UDP
+      // this sets up the local UDP port
+      Udp.begin(WiFi.localIP(), udpPort);
+#endif
+      // use the last number of the IP address the mesage identifier
       message.id = WiFi.localIP()[3];
       wifiConnected = true;
       break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
       Serial.println("WiFi lost connection.");
-      // do not use the last number of the IP address as identifier
+      // do not use the last number of the IP address as identifier any more
       message.id = 0;
       wifiConnected = false;
+#ifdef USE_UDP
+      Udp.stop();
+#endif
       ESP.restart();
       break;
     default:
       break;
   }
 }
+
+long timestampOffset = 0;
+float timestampSlope = 1;
+
+unsigned long getTimestamp() {
+  float timestamp = millis();
+  timestamp += timestampOffset;
+  timestamp *= timestampSlope;
+  return timestamp; // typecast to unsigned long
+}
+
+#ifdef DO_CLOCKSYNC
+// the server sends a UDP broadcast packet with its timestamp
+// this is used to update the linear mapping between teh local clock and that of the server
+
+AsyncUDP Sync;
+const unsigned int syncPort = 4002;
+
+void SyncHandler(AsyncUDPPacket packet) {
+  if (packet.length() == 4) {
+    uint8_t *ptr = packet.data();
+    unsigned long timestamp = ((unsigned long *)ptr)[0];
+    timestamp = ntohl(timestamp);
+    timestampOffset = (timestamp - millis());
+    Serial.print("offset = ");
+    Serial.println(timestampOffset);
+
+  }
+}
+#endif
+
+/**************************************************************************************************/
 
 void setup() {
   esp_err_t err;
@@ -164,6 +207,16 @@ void setup() {
     delay(100);
   }
 
+#ifdef DO_CLOCKSYNC
+  if (Sync.listen(syncPort)) {
+    Serial.print("Listening for clock synchronization on ");
+    Serial.print(WiFi.localIP());
+    Serial.print(":");
+    Serial.println(syncPort);
+    Sync.onPacket(SyncHandler);
+  }
+#endif
+
   // The I2S config as per the example
   const i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),  // receive, not transfer
@@ -193,11 +246,13 @@ void setup() {
   }
   Serial.println("I2S pins set.");
 
-  for (int i; i < sampleRate; i++) {
+  for (int i; i < 2 * sampleRate; i++) {
     err = i2s_read(I2S_PORT, buffer, 4, &bytes_read, 0);
   }
 
 } // setup
+
+/**************************************************************************************************/
 
 void loop() {
 
@@ -277,18 +332,17 @@ void loop() {
       Serial.print(message.version); Serial.print(", ");
       Serial.print(message.id); Serial.print(", ");
       Serial.print(message.counter); Serial.print(", ");
-      Serial.print(message.samples); Serial.print(", ");
-      Serial.print(message.data[0]); Serial.println();
+      Serial.print(message.samples); Serial.println();
 #endif
 
 #ifdef PRINT_ELAPSED
-    thisPacket = millis();
-    Serial.println(thisPacket-lastPacket);
-    lastPacket = thisPacket;
+      thisPacket = millis();
+      Serial.println(thisPacket - lastPacket);
+      lastPacket = thisPacket;
 #endif
 
 #ifdef DO_RECONNECT
-      if  (lastConnect==0 || (millis() - lastConnect) > reconnectInterval) {
+      if  (lastConnect == 0 || (millis() - lastConnect) > maintenanceInterval) {
         // reconnect to TCP, but don't try to reconnect too often
         lastConnect = millis();
 
@@ -297,7 +351,7 @@ void loop() {
         lastBlink = millis();
 
         if (wifiConnected && !tcpConnected) {
-          tcpConnected = Tcp.connect(serverAddress, serverPort);
+          tcpConnected = Tcp.connect(serverAddress, tcpPort);
           if (tcpConnected) {
             Serial.print("Connected to ");
             Serial.println(serverAddress);
@@ -310,9 +364,8 @@ void loop() {
       }
 #endif
 
-
-      if (wifiConnected && tcpConnected) {
-        blinkTime = 1000;
+      if (wifiConnected) {
+        blinkInterval = 1000;
 
 #ifdef DO_THRESHOLD
         bool aboveThreshold = (10 * log10(shortstat.Variance() - dbMax) > volumeThreshold);
@@ -325,17 +378,31 @@ void loop() {
 #endif
 
         if (aboveThreshold) {
-          int count = Tcp.write((uint8_t *)(&message), sizeof(message));
+          int count;
+#ifdef USE_UDP
+          Udp.beginPacket(serverAddress, udpPort);
+          count = Udp.write((uint8_t *)(&message), sizeof(message));
+          Udp.endPacket();
+          udpConnected = (count == sizeof(message));
+          if (!udpConnected) {
+            Serial.println("not connected to udp");
+            blinkInterval = 250;
+          }
+#endif
+#ifdef USE_TCP
+          count = Tcp.write((uint8_t *)(&message), sizeof(message));
           tcpConnected = (count == sizeof(message));
-        }
-      }
-      else if (!wifiConnected) {
+          if (!tcpConnected) {
+            Serial.println("not connected to tcp");
+            blinkInterval = 250;
+          }
+#endif
+        } // if aboveThreshold
+      } // if wifiConnected
+
+      else {
         Serial.println("not connected to wifi");
-        blinkTime = 250;
-      }
-      else if (!tcpConnected) {
-        Serial.println("not connected to tcp");
-        blinkTime = 250;
+        blinkInterval = 250;
       }
 
       shortstat.Clear();
