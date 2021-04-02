@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import pyaudio
+import audioop
 import socket
 import struct
 import numpy as np
@@ -21,13 +22,12 @@ device = 9
 rate = 44100
 format = pyaudio.paFloat32
 channels = 8
+state = None
 
 USE_TCP = False
 tcpPort = 4000
 udpPort = 4001
 syncPort = 4002
-
-samples = 0
 
 fifo = {}
 fifolock = threading.Lock()
@@ -51,6 +51,7 @@ class RingBuffer():
         self.id = id
         self.length = length
         self.buffer = np.zeros(length, dtype=np.int16)
+ 
         self.pushcount = 0  # the total number of samples that has been pushed
         self.popcount = 0   # the total number of samples that has been popped
         self.pushindex = 0  # the current sample in the buffer to be pushed
@@ -111,13 +112,15 @@ def audioHandler(input, frame_count, time_info, status):
         # if multiple output channels are configured, each microphone will go to its own channel
         chanindx = 0
         for id, buffer in fifo.items():
+            
             if chanindx<channels:
-                output[:,chanindx] += buffer.pop(frame_count)*amplitude
+                output[:,chanindx] += amplitude * buffer.pop(frame_count)
             else:
                 raise RuntimeError('there are more microphones than output channels')
             if channels>1:
                 # only increment if there are multiple output channels, otherwise stick to the first channel
                 chanindx += 1
+
         if channels==1 and len(fifo)>0:
             # automatically scale the volume so that it does not clip
             # the sum of int16 values should not exeed the maximum it can represent
@@ -144,31 +147,52 @@ def audioHandler(input, frame_count, time_info, status):
 
 def messageHandler(conn):
     # this is to deal with a single incoming TCP or UDP message
-    global samples
+    global rate
 
-    # the packet will not be 2048 bytes long, but depends on the number of audio samples
+    # the actual packet length will not be 2048 bytes, but depends on the format and number of audio samples
     buf = sock.recv(2048)
     if len(buf)<12:
         return
 
-    (byte0, byte1, counter, timestamp, id) = struct.unpack('BBHII', buf[0:12])
-    if byte0!=128 or byte1!=11:
-        return
+    # see https://en.wikipedia.org/wiki/RTP_payload_formats
+    (version, type, counter, timestamp, id) = struct.unpack('BBHII', buf[0:12])
+
+    if version!=128:
+        raise RuntimeError('unsupported packet version')
     
-    dat = np.frombuffer(bytearray(buf[12:]), dtype=np.int16)
-    samples = len(dat)
+    state = None
+    fragment = bytearray(buf[12:])
+    
+    if type==0:
+        # type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ-Law audio 64 kbit/s               RFC 3551
+        fragment = audioop.ulaw2lin(fragment, 2)
+        fragment, state = audioop.ratecv(fragment, 2, 1, 8000, 44100, state)
+        dat = np.frombuffer(fragment, np.int16)
+    elif type==1:
+        # type=8  PCMA  audio 1 8000  any 20  ITU-T G.711 PCM A-Law audio 64 kbit/s               RFC 3551
+        fragment = audioop.alaw2lin(fragment, 2)
+        fragment, state = audioop.ratecv(fragment, 2, 1, 8000, 44100, state)
+        dat = np.frombuffer(fragment, np.int16)
+    elif type==11:
+        # type=11 L16   audio 1 44100 any 20  Linear PCM 16-bit audio 705.6 kbit/s, uncompressed  RFC 3551, Page 27
+        dat = np.frombuffer(fragment, np.int16)
+    else:
+        raise RuntimeError('unsupported RTP packet type')
+    
 
     with fifolock:
          if not id in fifo:
-             fifo[id] = RingBuffer(id, rate) # make a buffer that can hold one second
+             fifo[id] = RingBuffer(id, rate) # make a buffer that can hold one second of audio
          if not id in previous:
              previous[id] = 0
              missed[id] = 0
          else:
-             for missing in range(counter - previous[id] -1):
+             samples = len(dat)
+             for missing in range(counter - previous[id] - 1):
                  logger.debug('missed packet from %d' % (id))
                  missed[id] += 1
-                 noise = np.random.random(samples) # FIXME
+                 # See https://en.wikipedia.org/wiki/Comfort_noise
+                 noise = np.random.random(samples) # FIXME these are only positive
                  noise *= np.linalg.norm(dat)/np.linalg.norm(noise)
                  fifo[id].push(noise.astype(np.int16))
          fifo[id].push(dat)
@@ -183,6 +207,7 @@ def tcpClientHandler(conn, addr):
 
 
 def regularMaintenance():
+    global missed
     print(missed)
     
     # since the volume scales automatically with the number of microphones to prevent clipping
@@ -190,8 +215,9 @@ def regularMaintenance():
     remove = []
     with fifolock:
         for id, buffer in fifo.items():
+            print(id, buffer.pushcount - buffer.popcount)
             toc = time.time() - buffer.lastseen
-            if toc > 15:
+            if toc > 10:
                 logger.info('removing buffer for %d' % (id))
                 remove.append(id)
         for id in remove:
@@ -201,12 +227,12 @@ def regularMaintenance():
 
     # send a broadcast UDP message with the server timestamp
     timestamp = round(time.monotonic()*1000)
-    logger.info("server timestamp = %d" % timestamp)
+    logger.debug("server timestamp = %d" % timestamp)
     timestamp = struct.pack('!I', timestamp)
     clocksync.sendto(timestamp, ('<broadcast>', syncPort))
     
     # start this function again after some time
-    threading.Timer(2.0, regularMaintenance).start()
+    threading.Timer(1.0, regularMaintenance).start()
 
 
 if __name__ == '__main__':

@@ -1,6 +1,4 @@
-/*
-   See https://www.johndcook.com/blog/standard_deviation/ and https://www.johndcook.com/blog/skewness_kurtosis/
-*/
+// See https://www.johndcook.com/blog/standard_deviation/ and https://www.johndcook.com/blog/skewness_kurtosis/
 
 #ifndef _RUNNINGSTAT_H_
 #define _RUNNINGSTAT_H_

@@ -1,5 +1,5 @@
 /*
-   Sketch for ESP32 board, like the NodeMCU 32S or the Adafruit Huzzah32
+   Sketch for ESP32 board, like the NodeMCU 32S, LOLIN32, or the Adafruit Huzzah32
    connected to a INMP411 I2S microphone
 
    See https://diyi0t.com/i2s-sound-tutorial-for-esp32/
@@ -17,8 +17,15 @@
 
 #include "secret.h" // this contains the ssid and password
 #include "RunningStat.h"
+#include "g711.h"
+
+// see https://en.wikipedia.org/wiki/Real-time_Transport_Protocol, one of these should be defined
+#define RTP_ULAW
+// #define RTP_ALAW
+// #define RTP_L16
 
 #define LED_BUILTIN 22
+
 #define USE_DHCP
 #define USE_UDP
 // #define USE_TCP
@@ -64,9 +71,21 @@ unsigned long lastBlink = 0, lastThreshold = 0, lastConnect = 0, lastClock = 0;
 unsigned long offset = 0;
 unsigned long thisPacket, lastPacket;
 bool wifiConnected = false, tcpConnected = false, udpConnected = false;
+
+// see https://en.wikipedia.org/wiki/Real-time_Transport_Protocol
+#if defined(RTP_ULAW)
+const unsigned char rtpType = 0;
+const unsigned int sampleRate = 8000;
+#elif defined(RTP_ALAW)
+const unsigned char rtpType = 1;
+const unsigned int sampleRate = 8000;
+#elif defined(RTP_L16)
+const unsigned char rtpType = 11;
 const unsigned int sampleRate = 44100;
-const unsigned int nMessage = 720;      // this can be up to 720 and still fit within the MTU of 1500 bytes
-const unsigned int nBuffer = 720;       // minimum 8, maximum 1024
+#endif
+
+const unsigned int nMessage = 400;      // this can be up to 720 and still fit within the MTU of 1500 bytes
+const unsigned int nBuffer = nMessage;  // minimum 8, maximum 1024
 unsigned int samplesReady = 0;
 long timestampOffset = 0;
 float timestampSlope = 1;
@@ -86,16 +105,22 @@ const double signalDivider = pow(2, 12);
 // see https://en.wikipedia.org/wiki/Real-time_Transport_Protocol
 struct message_t {
   // the format of the packet header is always the same
-  uint8_t byte0 = 2 << 6;  // the RTP version is 2
-  uint8_t byte1 = 11;      // the RTP type is 0, 8, or 11
+  uint8_t version = (2 << 6);  // the RTP version is 2
+  uint8_t type = rtpType;      // the RTP type is 0, 1, or 11
   uint16_t counter = 0;
   uint32_t timestamp = 0;
   uint32_t id = 0;
-  // the data is represented as follows
-  // type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ -Law audio 64 kbit/s              RFC 3551
+  // the data is represented according to one of these
+#if defined(RTP_ULAW)
+  // type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ-Law audio 64 kbit/s               RFC 3551
+  uint8_t data[nMessage];
+#elif defined(RTP_ALAW)
   // type=8  PCMA  audio 1 8000  any 20  ITU-T G.711 PCM A-Law audio 64 kbit/s               RFC 3551
+  uint8_t data[nMessage];
+#elif defined(RTP_L16)
   // type=11 L16   audio 1 44100 any 20  Linear PCM 16-bit audio 705.6 kbit/s, uncompressed  RFC 3551, Page 27
   int16_t data[nMessage];
+#endif
 } message __attribute__((packed));
 
 esp_err_t err;
@@ -157,9 +182,6 @@ void SyncHandler(AsyncUDPPacket packet) {
     unsigned long timestamp = ((unsigned long *)ptr)[0];
     timestamp = ntohl(timestamp);
     timestampOffset = (timestamp - millis());
-    Serial.print("offset = ");
-    Serial.println(timestampOffset);
-
   }
 }
 #endif
@@ -314,9 +336,15 @@ void loop() {
       Serial.println(value);
 #endif
 
+#if defined(RTP_ULAW)
+      message.data[samplesReady] = linear2ulaw(value); // this casts the value to an int16, and then converts to uint8
+#elif defined(RTP_ALAW)
+      message.data[samplesReady] = linear2alaw(value); // this casts the value to an int16, and then converts to uint8
+#elif defined(RTP_L16)
       message.data[samplesReady] = value; // this casts the value to an int16
-      samplesReady++;
+#endif
 
+      samplesReady++;
       shortstat.Push(value);
       longstat.Push(value);
     }
@@ -340,8 +368,8 @@ void loop() {
 #endif
 
 #ifdef PRINT_HEADER
-      Serial.print(message.byte0); Serial.print(", ");
-      Serial.print(message.byte1); Serial.print(", ");
+      Serial.print(message.version); Serial.print(", ");
+      Serial.print(message.type); Serial.print(", ");
       Serial.print(message.counter); Serial.print(", ");
       Serial.print(message.timestamp); Serial.print(", ");
       Serial.println(message.id);
@@ -418,9 +446,8 @@ void loop() {
       }
 
       shortstat.Clear();
-      message.counter++;
-      message.timestamp = 0;
       samplesReady = 0;
+      message.counter++;
     }
   }
 
