@@ -22,7 +22,6 @@ device = 9
 rate = 44100
 format = pyaudio.paFloat32
 channels = 8
-state = None
 
 USE_TCP = False
 tcpPort = 4000
@@ -30,12 +29,14 @@ udpPort = 4001
 syncPort = 4002
 
 fifo = {}
-fifolock = threading.Lock()
 previous = {}
 missed = {}
+state = {}
+
 running = True
 clients = []
 threads = []
+fifolock = threading.Lock()
 
 # this is used to send UDP packets with the server timestamp
 clocksync = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -51,6 +52,7 @@ class RingBuffer():
         self.id = id
         self.length = length
         self.buffer = np.zeros(length, dtype=np.int16)
+        self.timestamp = np.zeros(length)
  
         self.pushcount = 0  # the total number of samples that has been pushed
         self.popcount = 0   # the total number of samples that has been popped
@@ -60,18 +62,23 @@ class RingBuffer():
         self.lock = threading.Lock()  # prevent concurency problems
         logger.info('initialized buffer of %d samples for %d' % (length, id))
 
-    def push(self, dat):
+    def push(self, dat, timestamp):
         l = len(dat)
         logger.debug('pushed %d samples from %d' % (l, self.id))
         self.lastseen = time.time()
+        # make a millisecond timestamp for every sample
+        ts = timestamp + np.arange(0, l)*1000/44100
         with self.lock:
             if self.pushindex + l < self.length:
                 self.buffer[self.pushindex:self.pushindex + l] = dat
+                self.timestamp[self.pushindex:self.pushindex + l] = ts
             else:
                 l1 = self.length - self.pushindex
                 l2 = l - l1
                 self.buffer[-l1:] = dat[0:l1]  # insert this at the end
                 self.buffer[:l2] = dat[l1:]    # insert this at the start
+                self.timestamp[-l1:] = ts[0:l1]  # insert this at the end
+                self.timestamp[:l2] = ts[l1:]    # insert this at the start
             self.pushcount += l
             self.pushindex = self.pushcount % self.length
             # check how many samples we have pushed and popped
@@ -102,9 +109,33 @@ class RingBuffer():
                 self.popindex = self.popcount % self.length
         return dat
 
+    def samples(self):
+        # how many samples are available?
+        return self.pushcount-self.popcount
+
+    def latest(self):
+        # what is the timestamp of the latest sample?
+        return self.timestamp[self.pushindex-1]
+
+    def oldest(self):
+        # what is the timestamp of the oldest sample?
+        return self.timestamp[self.popindex]
+
+    def align(self, timestamp):
+        if timestamp<self.oldest() or timestamp>self.latest():
+            logger.warning('requested alignment is out of range')
+        else:
+            index = np.argmin(np.abs(self.timestamp - timestamp))
+            if index<self.popindex:
+                self.pop(self.popindex-index)
+            elif index>self.popindex:
+                self.pop(index-self.popindex)
+ 
 
 def audioHandler(input, frame_count, time_info, status):
     # this is called whenever the audio card needs new data
+    global fifo, previous, missed, state
+
     output = np.zeros((frame_count, channels), dtype=np.float32)
 
     with fifolock:
@@ -147,7 +178,7 @@ def audioHandler(input, frame_count, time_info, status):
 
 def messageHandler(conn):
     # this is to deal with a single incoming TCP or UDP message
-    global rate
+    global fifo, previous, missed, state
 
     # the actual packet length will not be 2048 bytes, but depends on the format and number of audio samples
     buf = sock.recv(2048)
@@ -160,44 +191,43 @@ def messageHandler(conn):
     if version!=128:
         raise RuntimeError('unsupported packet version')
     
-    state = None
     fragment = bytearray(buf[12:])
     
-    if type==0:
-        # type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ-Law audio 64 kbit/s               RFC 3551
-        fragment = audioop.ulaw2lin(fragment, 2)
-        fragment, state = audioop.ratecv(fragment, 2, 1, 8000, 44100, state)
-        dat = np.frombuffer(fragment, np.int16)
-    elif type==1:
-        # type=8  PCMA  audio 1 8000  any 20  ITU-T G.711 PCM A-Law audio 64 kbit/s               RFC 3551
-        fragment = audioop.alaw2lin(fragment, 2)
-        fragment, state = audioop.ratecv(fragment, 2, 1, 8000, 44100, state)
-        dat = np.frombuffer(fragment, np.int16)
-    elif type==11:
-        # type=11 L16   audio 1 44100 any 20  Linear PCM 16-bit audio 705.6 kbit/s, uncompressed  RFC 3551, Page 27
-        dat = np.frombuffer(fragment, np.int16)
-    else:
-        raise RuntimeError('unsupported RTP packet type')
-    
-
     with fifolock:
-         if not id in fifo:
+        if not id in fifo:
              fifo[id] = RingBuffer(id, rate) # make a buffer that can hold one second of audio
-         if not id in previous:
-             previous[id] = 0
+             previous[id] = None
+             state[id] = None
              missed[id] = 0
-         else:
-             samples = len(dat)
-             for missing in range(counter - previous[id] - 1):
-                 logger.debug('missed packet from %d' % (id))
-                 missed[id] += 1
-                 # See https://en.wikipedia.org/wiki/Comfort_noise
-                 noise = np.random.random(samples) # FIXME these are only positive
-                 noise *= np.linalg.norm(dat)/np.linalg.norm(noise)
-                 fifo[id].push(noise.astype(np.int16))
-         fifo[id].push(dat)
-
-    previous[id] = counter
+        
+        if type==0:
+            # type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ-Law audio 64 kbit/s               RFC 3551
+            fragment = audioop.ulaw2lin(fragment, 2)
+            fragment, state[id] = audioop.ratecv(fragment, 2, 1, 8000, 44100, state[id])
+            dat = np.frombuffer(fragment, np.int16)
+        elif type==1:
+            # type=8  PCMA  audio 1 8000  any 20  ITU-T G.711 PCM A-Law audio 64 kbit/s               RFC 3551
+            fragment = audioop.alaw2lin(fragment, 2)
+            fragment, state[id] = audioop.ratecv(fragment, 2, 1, 8000, 44100, state[id])
+            dat = np.frombuffer(fragment, np.int16)
+        elif type==11:
+            # type=11 L16   audio 1 44100 any 20  Linear PCM 16-bit audio 705.6 kbit/s, uncompressed  RFC 3551, Page 27
+            dat = np.frombuffer(fragment, np.int16)
+        else:
+            raise RuntimeError('unsupported RTP packet type')
+        
+        if not previous[id]==None:
+            for missing in range(previous[id] + 1 - counter, 0):
+                logger.debug('missed packet from %d' % (id))
+                # See https://en.wikipedia.org/wiki/Comfort_noise
+                missing_dat = np.random.random(len(dat)) # FIXME these are only positive
+                missing_dat *= np.linalg.norm(dat)/np.linalg.norm(missing_dat)
+                missing_timestamp = timestamp + missing*len(dat)*1000/44100
+                missed[id] += 1
+                fifo[id].push(missing_dat.astype(np.int16), missing_timestamp)
+        
+        previous[id] = counter
+        fifo[id].push(dat, timestamp)
     
 
 def tcpClientHandler(conn, addr):
@@ -207,23 +237,36 @@ def tcpClientHandler(conn, addr):
 
 
 def regularMaintenance():
-    global missed
-    print(missed)
+    # this is to detect microphones that have disappeared and to send the synchronization clock
+    global fifo, previous, missed, state
     
-    # since the volume scales automatically with the number of microphones to prevent clipping
-    # we should remove old microphones that have gone offline
-    remove = []
     with fifolock:
+        print('------------------------------------------------------------------')
         for id, buffer in fifo.items():
-            print(id, buffer.pushcount - buffer.popcount)
+            print(id, missed[id], buffer.samples())
+
+        # remove microphones that have gone offline
+        disappeared = []
+        for id, buffer in fifo.items():
             toc = time.time() - buffer.lastseen
-            if toc > 10:
-                logger.info('removing buffer for %d' % (id))
-                remove.append(id)
-        for id in remove:
+            if toc > 5:
+                disappeared.append(id)
+        for id in disappeared:
+            logger.info('removing buffer for %d' % (id))
             del fifo[id]
             del previous[id]
             del missed[id]
+            del state[id]
+
+        # align the buffers to each other
+        if len(fifo)>1:
+            timestamp = []
+            for id, buffer in fifo.items():
+                timestamp.append(buffer.oldest())
+            timestamp = np.max(timestamp)
+            for id, buffer in fifo.items():
+                buffer.align(timestamp)
+
 
     # send a broadcast UDP message with the server timestamp
     timestamp = round(time.monotonic()*1000)
@@ -231,8 +274,8 @@ def regularMaintenance():
     timestamp = struct.pack('!I', timestamp)
     clocksync.sendto(timestamp, ('<broadcast>', syncPort))
     
-    # start this function again after some time
-    threading.Timer(1.0, regularMaintenance).start()
+    # start the maintenance function again after some time
+    threading.Timer(2.0, regularMaintenance).start()
 
 
 if __name__ == '__main__':
