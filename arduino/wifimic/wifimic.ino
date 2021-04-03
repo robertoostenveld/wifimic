@@ -102,13 +102,20 @@ const double signalDivider = pow(2, 12);
     With lower values for the divider, the limiter is certainly needed.
 */
 
+unsigned long getTimestamp() {
+  float timestamp = millis();
+  timestamp += timestampOffset;
+  timestamp *= timestampSlope;
+  return timestamp; // typecast to unsigned long
+}
+
 // see https://en.wikipedia.org/wiki/Real-time_Transport_Protocol
 struct message_t {
   // the format of the packet header is always the same
   uint8_t version = (2 << 6);  // the RTP version is 2
   uint8_t type = rtpType;      // the RTP type is 0, 1, or 11
   uint16_t counter = 0;
-  uint32_t timestamp = 0;
+  uint32_t timestamp = getTimestamp();
   uint32_t id = 0;
   // the data is represented according to one of these
 #if defined(RTP_ULAW)
@@ -162,12 +169,6 @@ void WiFiEvent(WiFiEvent_t event) {
   }
 }
 
-unsigned long getTimestamp() {
-  float timestamp = millis();
-  timestamp += timestampOffset;
-  timestamp *= timestampSlope;
-  return timestamp; // typecast to unsigned long
-}
 
 #ifdef DO_CLOCKSYNC
 // the server sends a UDP broadcast packet with its timestamp
@@ -304,10 +305,6 @@ void loop() {
 
   if (err == ESP_OK) {
     for (unsigned int sample; sample < bytes_read / 4; sample++) {
-
-      if (message.timestamp == 0) {
-        message.timestamp = getTimestamp();
-      }
 
       double value = buffer[sample];
 
@@ -448,6 +445,7 @@ void loop() {
       shortstat.Clear();
       samplesReady = 0;
       message.counter++;
+      message.timestamp = getTimestamp();
     }
   }
 
