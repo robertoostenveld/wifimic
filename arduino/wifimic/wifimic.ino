@@ -33,7 +33,7 @@
 // #define DO_FILTER
 // #define DO_LIMITER
 // #define DO_THRESHOLD
-// #define DO_CLOCKSYNC
+#define DO_CLOCKSYNC
 // #define PRINT_VALUE
 // #define PRINT_RANGE
 // #define PRINT_VOLUME
@@ -60,7 +60,6 @@ unsigned long blinkInterval = 250;
 unsigned long thresholdInterval = 500;
 unsigned int maintenanceInterval = 5000;
 unsigned long lastBlink = 0, lastThreshold = 0, lastConnect = 0, lastClock = 0;
-unsigned long offset = 0;
 unsigned long thisPacket, lastPacket;
 bool wifiConnected = false, tcpConnected = false, udpConnected = false;
 
@@ -86,7 +85,7 @@ const double alpha = 10. / sampleRate;  // if the sampling time dT is much small
 double signalMean = sqrt(-1);           // initialize as not-a-number
 const double dbMax = 90.3;              // this is the loudest that an int16 signal can get, alternating between MININT16 and MAXINT16
 const double volumeThreshold = -40;     // relative to the maxiumum
-const double signalDivider = pow(2, 11);
+const double signalDivider = pow(2, 12);
 
 /*
     With a divider of 2^16=65536 blowing hard into the mic still does not clips. In this case the limiter is not needed.
@@ -181,8 +180,28 @@ void SyncHandler(AsyncUDPPacket packet) {
 
 hw_timer_t * timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+volatile int interruptCounter;
 
 void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  interruptCounter++;
+  portEXIT_CRITICAL_ISR(&timerMux);
+
+  // how many samples do we still need to fill the current page?
+  size_t samplesNeeded = nPacket - samples[filling];
+
+  if (samplesNeeded > nBuffer)
+    // do not read more than nBuffer at a time
+    samplesNeeded = nBuffer;
+
+  uint32_t bytes_read;
+  esp_err_t err = i2s_read(I2S_PORT, page[filling] + samples[filling], samplesNeeded * 4, &bytes_read, 0);
+  if (err == ESP_OK)
+    samples[filling] += bytes_read / 4;
+
+  if (samples[filling] == nPacket)
+    // the current page is full, move on to the next page
+    filling = (filling + 1) % nPage;
 }
 
 
@@ -279,7 +298,7 @@ void setup() {
 
   timer = timerBegin(0, 80, true);     // use a divider of 80 to make the timer count in microseconds
   timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, 10000, true); // run 100x per second
+  timerAlarmWrite(timer, 1000, true);  // run every 1000 microseconds 
   timerAlarmEnable(timer);
 
 } // setup
@@ -292,22 +311,6 @@ void loop() {
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
     lastBlink = millis();
   }
-
-  // how many samples do we still need to fill the current page?
-  size_t samplesNeeded = nPacket - samples[filling];
-
-  if (samplesNeeded > nBuffer)
-    // do not read more than nBuffer at a time
-    samplesNeeded = nBuffer;
-
-  uint32_t bytes_read;
-  esp_err_t err = i2s_read(I2S_PORT, page[filling] + samples[filling], samplesNeeded * 4, &bytes_read, 0);
-  if (err == ESP_OK)
-    samples[filling] += bytes_read / 4;
-
-  if (samples[filling] == nPacket)
-    // the current page is full, move on to the next page
-    filling = (filling + 1) % nPage;
 
   if (samples[sending] == nPacket) {
 
