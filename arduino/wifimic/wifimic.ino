@@ -26,10 +26,10 @@
 
 #define LED_BUILTIN 22
 
-#define USE_DHCP
+#define USE_WIFI        // required for TCP and UDP
 #define USE_UDP
 // #define USE_TCP
-// #define DO_RECONNECT
+// #define DO_RECONNECT // not needed for UDP
 // #define DO_FILTER
 // #define DO_LIMITER
 // #define DO_THRESHOLD
@@ -46,14 +46,6 @@
 const double b_coefficients[] = {0.049261, -0.000000, -0.147783, -0.000000, 0.147783, -0.000000, -0.049261};
 const double a_coefficients[] = {1.000000, -4.038586, 6.833250, -6.350717, 3.497524, -1.079855, 0.138470};
 IIRFilter iir(b_coefficients, a_coefficients);
-#endif
-
-#ifndef USE_DHCP
-IPAddress localAddress(192, 168, 1, 100);
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 0, 0);
-IPAddress primaryDNS(8, 8, 8, 8);   //optional
-IPAddress secondaryDNS(8, 8, 4, 4); //optional
 #endif
 
 IPAddress serverAddress(192, 168, 1, 33);
@@ -85,7 +77,7 @@ const unsigned int sampleRate = 44100;
 #endif
 
 const unsigned int nMessage = 400;      // this can be up to 720 and still fit within the MTU of 1500 bytes
-const unsigned int nBuffer = nMessage;  // minimum 8, maximum 1024
+const unsigned int nBuffer = 1024;  // minimum 8, maximum 1024
 unsigned int samplesReady = 0;
 long timestampOffset = 0;
 float timestampSlope = 1;
@@ -133,11 +125,9 @@ struct message_t {
 esp_err_t err;
 uint32_t bytes_read;
 int32_t buffer[nBuffer];
-
 const i2s_port_t I2S_PORT = I2S_NUM_0;
 
-RunningStat shortstat;
-RunningStat longstat;
+RunningStat shortStat;
 
 void WiFiEvent(WiFiEvent_t event) {
   switch (event) {
@@ -168,7 +158,6 @@ void WiFiEvent(WiFiEvent_t event) {
       break;
   }
 }
-
 
 #ifdef DO_CLOCKSYNC
 // the server sends a UDP broadcast packet with its timestamp
@@ -211,15 +200,9 @@ void setup() {
   // delete old config
   WiFi.disconnect(true);
 
+#ifdef USE_WIFI
   //register event handler
   WiFi.onEvent(WiFiEvent);
-
-#ifndef USE_DHCP
-  if (!WiFi.config(localAddress, gateway, subnet, primaryDNS, secondaryDNS)) {
-    Serial.println("STA Failed to configure");
-    while (true);
-  }
-#endif
 
   //Initiate connection
   Serial.println("Connecting to WiFi network: " + String(ssid));
@@ -236,6 +219,9 @@ void setup() {
     digitalWrite(LED_BUILTIN, HIGH);
     delay(100);
   }
+#else
+  WiFi.mode(WIFI_OFF);
+#endif
 
 #ifdef DO_CLOCKSYNC
   if (Sync.listen(syncPort)) {
@@ -342,8 +328,7 @@ void loop() {
 #endif
 
       samplesReady++;
-      shortstat.Push(value);
-      longstat.Push(value);
+      shortStat.Push(value);
     }
 
     if (samplesReady == nMessage) {
@@ -438,11 +423,13 @@ void loop() {
       } // if wifiConnected
 
       else {
+#ifdef USE_WIFI
         Serial.println("not connected to wifi");
+#endif
         blinkInterval = 250;
       }
 
-      shortstat.Clear();
+      shortStat.Clear();
       samplesReady = 0;
       message.counter++;
       message.timestamp = getTimestamp();
