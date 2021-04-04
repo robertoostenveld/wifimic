@@ -111,26 +111,34 @@ class RingBuffer():
 
     def samples(self):
         # how many samples are available?
-        return self.pushcount-self.popcount
+        with self.lock:
+            return self.pushcount-self.popcount
 
     def latest(self):
         # what is the timestamp of the latest sample?
-        return self.timestamp[self.pushindex-1]
+        with self.lock:
+            return self.timestamp[self.pushindex-1]
 
     def oldest(self):
         # what is the timestamp of the oldest sample?
-        return self.timestamp[self.popindex]
+        with self.lock:
+            return self.timestamp[self.popindex]
 
     def align(self, timestamp):
         if timestamp<self.oldest() or timestamp>self.latest():
             logger.warning('requested alignment is out of range')
-        else:
+            return
+        
+        with self.lock:
             index = np.argmin(np.abs(self.timestamp - timestamp))
             if index<self.popindex:
-                self.pop(self.popindex-index)
+                amount = self.length-self.popindex+index
             elif index>self.popindex:
-                self.pop(index-self.popindex)
- 
+                amount = index-self.popindex
+            else:
+                amount = 0
+        self.pop(amount)
+
 
 def audioHandler(input, frame_count, time_info, status):
     # this is called whenever the audio card needs new data
@@ -139,10 +147,11 @@ def audioHandler(input, frame_count, time_info, status):
     output = np.zeros((frame_count, channels), dtype=np.float32)
 
     with fifolock:
-        # if a single output channel is configured, the microphones will be mixed up
+        # if a single output channel is configured, the microphones will be mixed together
         # if multiple output channels are configured, each microphone will go to its own channel
+        
         chanindx = 0
-        for id, buffer in fifo.items():
+        for buffer in fifo.values():
             
             if chanindx<channels:
                 output[:,chanindx] += amplitude * buffer.pop(frame_count)
@@ -238,7 +247,11 @@ def tcpClientHandler(conn, addr):
 
 def regularMaintenance():
     # this is to detect microphones that have disappeared and to send the synchronization clock
-    global fifo, previous, missed, state
+    global running, fifo, previous, missed, state
+    
+    if not running:
+        # also stop executing this maintenance function
+        return
     
     with fifolock:
         print('------------------------------------------------------------------')
@@ -261,10 +274,10 @@ def regularMaintenance():
         # align the buffers to each other
         if len(fifo)>1:
             timestamp = []
-            for id, buffer in fifo.items():
+            for buffer in fifo.values():
                 timestamp.append(buffer.oldest())
             timestamp = np.max(timestamp)
-            for id, buffer in fifo.items():
+            for buffer in fifo.values():
                 buffer.align(timestamp)
 
 
@@ -274,7 +287,7 @@ def regularMaintenance():
     timestamp = struct.pack('!I', timestamp)
     clocksync.sendto(timestamp, ('<broadcast>', syncPort))
     
-    # start the maintenance function again after some time
+    # start this maintenance function again after some time
     threading.Timer(2.0, regularMaintenance).start()
 
 
@@ -302,7 +315,7 @@ if __name__ == '__main__':
                     output_device_index=device,
                     stream_callback=audioHandler)
 
-    # stream.start_stream()
+    stream.start_stream()
 
     if USE_TCP:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -312,10 +325,9 @@ if __name__ == '__main__':
     else:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.bind(('', udpPort))
-
-
-    # this will run every N seconds
-    regularMaintenance()
+   
+    running = True
+    regularMaintenance()    # this will run every N seconds
 
     try:
         while True:
@@ -333,9 +345,9 @@ if __name__ == '__main__':
 
     except (SystemExit, KeyboardInterrupt, RuntimeError):
         logger.info('Stopping')
+        running = False
 
         for thread in threads:
-            running = False
             thread.join()
 
         stream.stop_stream()
