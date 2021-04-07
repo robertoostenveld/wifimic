@@ -188,7 +188,7 @@ def audioHandler(input, frame_count, time_info, status):
 def messageHandler(conn):
     # this is to deal with a single incoming TCP or UDP message
     global fifo, previous, missed, state
-
+    
     # the actual packet length will not be 2048 bytes, but depends on the format and number of audio samples
     buf = sock.recv(2048)
     if len(buf)<12:
@@ -204,10 +204,10 @@ def messageHandler(conn):
     
     with fifolock:
         if not id in fifo:
-             fifo[id] = RingBuffer(id, rate) # make a buffer that can hold one second of audio
-             previous[id] = None
-             state[id] = None
-             missed[id] = 0
+            fifo[id] = RingBuffer(id, rate) # make a buffer that can hold one second of audio
+            previous[id] = None
+            state[id] = None
+            missed[id] = 0
         
         if type==0:
             # type=0  PCMU  audio 1 8000  any 20  ITU-T G.711 PCM μ-Law audio 64 kbit/s               RFC 3551
