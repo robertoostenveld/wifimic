@@ -1,19 +1,30 @@
 /*
-   Sketch for ESP32 board, like the NodeMCU 32S, LOLIN32, or the Adafruit Huzzah32
-   connected to a INMP411 I2S microphone
+    Sketch for an ESP32 board, like the NodeMCU 32S, LOLIN32, or the Adafruit Huzzah32
+    connected to a INMP411 I2S microphone
 
-   See https://diyi0t.com/i2s-sound-tutorial-for-esp32/
-   and https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/i2s.html
+    See https://diyi0t.com/i2s-sound-tutorial-for-esp32/
+    and https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/i2s.html
 
+    This is how I connected the LOLIN32 Lite to the INMP411 module:
+      3V3 - VDD (red)
+      GND - GND (black)
+      26  - SD  (orange)
+      32  - L/R (blue)
+      33  - WS  (green)
+      25  - SCK (purple)
 */
 
+#if not defined(ESP32)
+#error This is a sketch for an ESP32 board, like the NodeMCU 32S, LOLIN32, or the Adafruit Huzzah32
+#endif
+
 #include <WiFi.h>
-#include <driver/i2s.h>
+#include <WiFiUdp.h>
+#include <AsyncUDP.h>
+#include <driver/i2s.h>   // this is specific to the ESP32
 #include <endian.h>
 #include <math.h>
 #include <limits.h>
-#include <WiFiUdp.h>
-#include <AsyncUDP.h>
 
 #include "secret.h" // this contains the ssid and password
 #include "RunningStat.h"
@@ -24,19 +35,19 @@
 // #define RTP_ALAW
 #define RTP_L16
 
-#define LED_BUILTIN 22
+#define LED_BUILTIN 22    // needed for the LOLIN32 Lite
 
-#define USE_WIFI       // required for TCP and UDP
-#define USE_UDP
+// #define USE_WIFI       // required for TCP and UDP
+// #define USE_UDP
 // #define USE_TCP
 // #define DO_RECONNECT   // not needed for UDP
 // #define DO_FILTER
 // #define DO_LIMITER
 // #define DO_THRESHOLD
-#define DO_CLOCKSYNC
+// #define DO_CLOCKSYNC
 // #define PRINT_VALUE
 // #define PRINT_RANGE
-// #define PRINT_VOLUME
+#define PRINT_VOLUME
 // #define PRINT_FREQUENCY
 // #define PRINT_HEADER
 // #define PRINT_ELAPSED
@@ -211,9 +222,12 @@ void setup() {
   esp_err_t err;
 
   Serial.begin(115200);
+  Serial.println("setup start");
 
-  pinMode(32, OUTPUT); digitalWrite(32, HIGH);  // L/R
-  pinMode(35, OUTPUT); digitalWrite(35, HIGH);  // VDD
+  pinMode(32, OUTPUT); 
+  digitalWrite(32, LOW);  // L/R
+
+  Serial.println("clear memory");
 
   for (int i = 0; i < nPage; i++) {
     page[i] = (int32_t *) malloc(nPacket * sizeof(int32_t));
@@ -314,7 +328,7 @@ void loop() {
 
   if (samples[sending] == nPacket) {
 
-    for (unsigned int sample; sample < nPacket; sample++) {
+    for (unsigned int sample = 0; sample < nPacket; sample++) {
       double value = page[sending][sample];
 
       // compute a smooth running mean with https://en.wikipedia.org/wiki/Exponential_smoothing
@@ -420,8 +434,8 @@ void loop() {
 #endif
 
       if (aboveThreshold) {
-        int count;
 #ifdef USE_UDP
+        int count;
         Udp.beginPacket(serverAddress, udpPort);
         count = Udp.write((uint8_t *)(&packet), sizeof(packet));
         Udp.endPacket();
