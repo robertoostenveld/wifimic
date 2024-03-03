@@ -224,6 +224,8 @@ void setup() {
   Serial.begin(115200);
   Serial.println("setup start");
 
+  pinMode(35, OUTPUT); 
+  digitalWrite(35, LOW);  // VDD
   pinMode(32, OUTPUT); 
   digitalWrite(32, LOW);  // L/R
 
